@@ -95,7 +95,7 @@ class SPMM(nn.Module):
             propertyFeatAll = torch.cat([propertyFeat_m.t(), self.property_queue.clone().detach()], dim=1)
             
             encSmiles_m = self.smilesEncoder_m.bert(smilesIds,attention_mask=smilesAttentionMask, return_dict=True).last_hidden_state
-            smilesFeat_m = F.normalize(self.smilesProj_m(encSmiles[:,0,:]), dim=-1)
+            smilesFeat_m = F.normalize(self.smilesProj_m(encSmiles_m[:,0,:]), dim=-1)
             smilesFeatAll = torch.cat([smilesFeat_m.t(), self.smiles_queue.clone().detach()], dim=1)
 
             sim_p2s_m = propertyFeat_m @ smilesFeatAll / self.temp
@@ -116,26 +116,86 @@ class SPMM(nn.Module):
 
         sim_p2s = propertyFeat @ smilesFeatAll / self.temp
         sim_s2p = smilesFeat @ propertyFeatAll / self.temp
-        sim_p2p = propertyFeat @ propertyFeatAll / self.temp
+        sim_p2p = propertyFeat @ propertyFeatAll / self.temps
         sim_s2s = smilesFeat @ smilesFeatAll / self.temp 
 
         loss_p2s = -torch.sum(F.log_softmax(sim_p2s, dim=1)*sim_p2s_targets, dim=1).mean()
         loss_s2p = -torch.sum(F.log_softmax(sim_s2p, dim=1)*sim_s2p_targets, dim=1).mean()
         loss_p2p = -torch.sum(F.log_softmax(sim_p2p, dim=1)*sim_p2p_targets, dim=1).mean()
-        loss_s2s = -torch.sum(F.log_softmax(sim_p2p, dim=1)*sim_s2s_targets, dim=1).mean()
+        loss_s2s = -torch.sum(F.log_softmax(sim_s2s, dim=1)*sim_s2s_targets, dim=1).mean()
 
         loss_psc = (loss_p2s + loss_s2p + loss_p2p + loss_s2s)/2 
 
         self._dequeue_and_enqueue(propertyFeat_m, smilesFeat_m)
 
         #4. X-attention
-        outputProperty = self.smilesEncoder
+        outputProperty_pos = self.smilesEncoder.bert(intputs_embeds = encProperty,
+                                                 attention_mask = propertyAtts,
+                                                 encoder_hidden_states = encSmiles,
+                                                 encoder_attention_mask = smilesAttentionMask,
+                                                 return_dict = True
+                                                 ).last_hidden_state[:,0,:] 
+        outputSmiles_pos = self.smilesEncoder.bert(inputs_embeds = encSmiles,
+                                               attention_mask = smilesAttentionMask,
+                                               encoder_hidden_states = encProperty,
+                                               encoder_attention_mask = propertyAtts,
+                                               return_dict = True
+                                               ).last_hidden_state[:,0,:]
 
-        #5. Next property prediction
+        #outputProperty_pos = outputProperty.last_hidden_state[:,0,:]
+        #outputSmiles_pos = outputSmiles.last_hidden_state[:,0,:]
 
-        #6. Next word prediction
+        #5. SMILES - Property Matching
+        with torch.no_grad():
+            batch_size = property.size(0)
+            weights_p2s = F.softmax(sim_p2s[:,:batch_size], dim=1)
+            weights_s2p = F.softmax(sim_s2p[:,:batch_size], dim=1)
 
-        #7. SMILES-property matching 
+            weights_p2s.fill_diagonal_(0)
+            weights_s2p.fill_diagonal_(0)
+        
+        encProperty_neg = []
+        
+        for b in range(batch_size):
+            neg_idx = torch.multinomial(weights_p2s[b], 1).item()
+            encProperty_neg.append(encProperty[neg_idx])
+        encProperty_neg = torch.stack(encProperty_neg, dim=0)
+        
+        encSmiles_neg = []
+        smilesAtts_neg = []
+
+        for b in range(batch_size):
+            neg_idx = torch.multinomial(weights_s2p[b], 1).item()
+            encSmiles_neg.append(encSmiles[neg_idx])
+            smilesAtts_neg.append(smilesAttentionMask[neg_idx])
+        encSmiles_neg = torch.stack(encSmiles_neg, dim=0)
+        smilesAtts_neg = torch.stack(smilesAtts_neg, dim=0)
+
+        encProperty_all = torch.cat([encProperty, encProperty_neg], dim=0)
+        propertyAtts_all = torch.cat([propertyAtts, propertyAtts], dim=0)
+
+        encSmiles_all = torch.cat([encSmiles_neg, encSmiles], dim=0)
+        smilesAtts_all = torch.cat([smilesAtts_neg, smilesAttentionMask], dim=0)
+
+        outputProperty_neg = self.smilesEncoder(inputs_embeds = encProperty_all,
+                                                attention_mask = propertyAtts_all,
+                                                encoder_hidden_states = encSmiles_all,
+                                                encoder_attention_mask = smilesAtts_all,
+                                                return_dict = True
+                                                ).last_hidden_state[:,0,:]
+        outputSmiles_neg = self.smilesEncoder(inputs_embeds = encSmiles_all,
+                                              attention_mask = smilesAtts_all,
+                                              encoder_hidden_states = encProperty_all,
+                                              encoder_attention_mask = encProperty_all,
+                                              return_dict = True
+                                              ).last_hidden_state[:,0,:]
+        
+        
+
+
+        #6. Next property prediction
+
+        #7. Next word prediction
     
     @torch.no_grad()
     def copy_params(self):
