@@ -36,8 +36,7 @@ class SPMM(nn.Module):
         self.queue_size = config['queue_size']
         self.momentum = config['momentum']
         
-        self.itm_head_smiles = nn.Linear(smilesWidth, 2)
-        self.itm_head_properties = nn.Linear(propertyWidth, 2)
+        self.psm_head = nn.Linear(propertyWidth + smilesWidth, 2)
 
         # Momentum Model
 
@@ -124,7 +123,7 @@ class SPMM(nn.Module):
         loss_p2p = -torch.sum(F.log_softmax(sim_p2p, dim=1)*sim_p2p_targets, dim=1).mean()
         loss_s2s = -torch.sum(F.log_softmax(sim_s2s, dim=1)*sim_s2s_targets, dim=1).mean()
 
-        loss_psc = (loss_p2s + loss_s2p + loss_p2p + loss_s2s)/2 
+        loss_psc = (loss_p2s + loss_s2p + loss_p2p + loss_s2s)/2 # property - smiles contrastive loss
 
         self._dequeue_and_enqueue(propertyFeat_m, smilesFeat_m)
 
@@ -141,6 +140,8 @@ class SPMM(nn.Module):
                                                encoder_attention_mask = propertyAtts,
                                                return_dict = True
                                                ).last_hidden_state[:,0,:]
+
+        pos_embeds = torch.cat([outputProperty_pos, outputSmiles_pos], dim=-1)
 
         #outputProperty_pos = outputProperty.last_hidden_state[:,0,:]
         #outputSmiles_pos = outputSmiles.last_hidden_state[:,0,:]
@@ -177,26 +178,41 @@ class SPMM(nn.Module):
         encSmiles_all = torch.cat([encSmiles_neg, encSmiles], dim=0)
         smilesAtts_all = torch.cat([smilesAtts_neg, smilesAttentionMask], dim=0)
 
-        outputProperty_neg = self.smilesEncoder(inputs_embeds = encProperty_all,
-                                                attention_mask = propertyAtts_all,
-                                                encoder_hidden_states = encSmiles_all,
-                                                encoder_attention_mask = smilesAtts_all,
-                                                return_dict = True
-                                                ).last_hidden_state[:,0,:]
-        outputSmiles_neg = self.smilesEncoder(inputs_embeds = encSmiles_all,
-                                              attention_mask = smilesAtts_all,
-                                              encoder_hidden_states = encProperty_all,
-                                              encoder_attention_mask = encProperty_all,
-                                              return_dict = True
-                                              ).last_hidden_state[:,0,:]
+        outputProperty_neg = self.smilesEncoder.bert(inputs_embeds = encProperty_all,
+                                                     attention_mask = propertyAtts_all,
+                                                     encoder_hidden_states = encSmiles_all,
+                                                     encoder_attention_mask = smilesAtts_all,
+                                                     return_dict = True
+                                                     ).last_hidden_state[:,0,:]
+        outputSmiles_neg = self.smilesEncoder.bert(inputs_embeds = encSmiles_all,
+                                                   attention_mask = smilesAtts_all,
+                                                   encoder_hidden_states = encProperty_all,
+                                                   encoder_attention_mask = encProperty_all,
+                                                   return_dict = True
+                                                   ).last_hidden_state[:,0,:]
         
         
+        neg_embeds = torch.cat([outputProperty_neg, outputSmiles_neg], dim=-1)
 
+        ps_embeddings = torch.cat([pos_embeds, neg_embeds], dim=0)
+        ps_output = self.psm_head(ps_embeddings)
+
+        psm_labels = torch.cat([torch.ones(batch_size, dtype=torch.long), torch.zeros(batch_size*2, dtype=torch.long)], 
+                               dim=0
+                               ).to(property.device)
+        
+        loss_psm = F.cross_entropy(ps_output, psm_labels)  #property-smiles matching loss 
 
         #6. Next property prediction
+        
+
+
 
         #7. Next word prediction
-    
+
+
+
+        
     @torch.no_grad()
     def copy_params(self):
         for model_pair in self.model_pairs:
