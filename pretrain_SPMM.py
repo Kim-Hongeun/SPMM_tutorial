@@ -1,8 +1,8 @@
 import torch
 import torch.nn.functional as F
 from torch import nn 
-from xbert import BertConfig 
-from transformers import BertTokenizer, BertForMaskedLM
+from xbert import BertConfig, BertForMaskedLM
+from transformers import BertTokenizer
 
 
 class SPMM(nn.Module):
@@ -71,7 +71,7 @@ class SPMM(nn.Module):
         embedProperty = self.propertyEmbed(property.unsqueeze(2))
         
         property_MASK = self.property_MASK.expand(property.size(0), property.size(1), -1)
-        halfMask = torch.bernoulli(torch.ones_like(property)*0.5)
+        halfMask = torch.bernoulli(torch.full(property.shape, 0.5))
         halfMaskBatch = halfMask.unsqueeze(2).repeat(1,1,property_MASK.size(2))
         maskedProperty = embedProperty* halfMaskBatch 
         inputProperty = torch.cat([self.property_CLS.expand(property.size(0), -1,-1), maskedProperty], dim=1)
@@ -81,7 +81,7 @@ class SPMM(nn.Module):
         propertyAtts = torch.ones(encProperty.size()[:-1], dtype=torch.long).to(inputProperty.device)
         propertyFeat = F.normalize(self.propertyProj(encProperty[:,0,:]), dim=-1)
 
-        encSmiles = self.smilesEncoder.bert(smilesIds, attention_mask=smilesAttentionMask, return_dict=True).last_hidden_State
+        encSmiles = self.smilesEncoder.bert(smilesIds, attention_mask=smilesAttentionMask, return_dict=True, mode='text').last_hidden_State
         smilesFeat = F.normalize(self.smilesProj(encSmiles[:,0,:]), dims=-1)
         
         #3. Contrastive Loss between the different & within the same modalities
@@ -89,11 +89,11 @@ class SPMM(nn.Module):
             self._momentum_update()
             
             encProperty_m = self.propertyEnoder_m(inputs_embeds=inputProperty, return_dic=True).last_hidden_state
-            propertyAtts_m = torch.ones(encProperty_m.size()[:-1], dtype=torch.long).to(inputProperty.device)
+            #propertyAtts_m = torch.ones(encProperty_m.size()[:-1], dtype=torch.long).to(inputProperty.device)
             propertyFeat_m = F.normalize(self.propertyProj_m(encProperty_m[:,0,:]), dim=-1)
             propertyFeatAll = torch.cat([propertyFeat_m.t(), self.property_queue.clone().detach()], dim=1)
             
-            encSmiles_m = self.smilesEncoder_m.bert(smilesIds,attention_mask=smilesAttentionMask, return_dict=True).last_hidden_state
+            encSmiles_m = self.smilesEncoder_m.bert(smilesIds,attention_mask=smilesAttentionMask, return_dict=True, mode='text').last_hidden_state
             smilesFeat_m = F.normalize(self.smilesProj_m(encSmiles_m[:,0,:]), dim=-1)
             smilesFeatAll = torch.cat([smilesFeat_m.t(), self.smiles_queue.clone().detach()], dim=1)
 
@@ -128,17 +128,19 @@ class SPMM(nn.Module):
         self._dequeue_and_enqueue(propertyFeat_m, smilesFeat_m)
 
         #4. X-attention
-        outputProperty_pos = self.smilesEncoder.bert(intputs_embeds = encProperty,
+        outputProperty_pos = self.smilesEncoder.bert(encoder_embeds = encProperty,
                                                  attention_mask = propertyAtts,
                                                  encoder_hidden_states = encSmiles,
                                                  encoder_attention_mask = smilesAttentionMask,
-                                                 return_dict = True
+                                                 return_dict = True,
+                                                 mode = 'fusion'
                                                  ).last_hidden_state[:,0,:] 
-        outputSmiles_pos = self.smilesEncoder.bert(inputs_embeds = encSmiles,
+        outputSmiles_pos = self.smilesEncoder.bert(encoder_embeds = encSmiles,
                                                attention_mask = smilesAttentionMask,
                                                encoder_hidden_states = encProperty,
                                                encoder_attention_mask = propertyAtts,
-                                               return_dict = True
+                                               return_dict = True,
+                                               mode = 'fusion'
                                                ).last_hidden_state[:,0,:]
 
         pos_embeds = torch.cat([outputProperty_pos, outputSmiles_pos], dim=-1)
@@ -178,17 +180,19 @@ class SPMM(nn.Module):
         encSmiles_all = torch.cat([encSmiles_neg, encSmiles], dim=0)
         smilesAtts_all = torch.cat([smilesAtts_neg, smilesAttentionMask], dim=0)
 
-        outputProperty_neg = self.smilesEncoder.bert(inputs_embeds = encProperty_all,
+        outputProperty_neg = self.smilesEncoder.bert(encoder_embeds = encProperty_all,
                                                      attention_mask = propertyAtts_all,
                                                      encoder_hidden_states = encSmiles_all,
                                                      encoder_attention_mask = smilesAtts_all,
-                                                     return_dict = True
+                                                     return_dict = True,
+                                                     mode = 'fusion'
                                                      ).last_hidden_state[:,0,:]
-        outputSmiles_neg = self.smilesEncoder.bert(inputs_embeds = encSmiles_all,
+        outputSmiles_neg = self.smilesEncoder.bert(encoder_embeds = encSmiles_all,
                                                    attention_mask = smilesAtts_all,
                                                    encoder_hidden_states = encProperty_all,
                                                    encoder_attention_mask = encProperty_all,
-                                                   return_dict = True
+                                                   return_dict = True,
+                                                   mode = 'fusion'
                                                    ).last_hidden_state[:,0,:]
         
         
@@ -203,12 +207,38 @@ class SPMM(nn.Module):
         
         loss_psm = F.cross_entropy(ps_output, psm_labels)  #property-smiles matching loss 
 
-        #6. Next property prediction
+        #6. Next smiles prediction
         
+        inputs_ids = smilesIds.clone()
+        labels = inputs_ids.clone()[:,1:]
+
+        with torch.no_grad():
+            logits_m = self.smilesEncoder_m(inputs_ids, 
+                                            attention_mask = smilesAttentionMask,
+                                            encoder_hidden_states = encProperty_m,
+                                            encoder_attention_mask = propertyAtts,
+                                            return_dict = True,
+                                            is_decoder = True,
+                                            return_logits = True
+                                            )[:,:-1,:]
+        
+        nsp_output = self.smilesEncoder(inputs_ids,
+                                        attention_mask = smilesAttentionMask,
+                                        encoder_hidden_states = encProperty,
+                                        encoder_attention_mask = propertyAtts,
+                                        return_dict = True,
+                                        is_decoder =True,
+                                        return_logits = True
+                                        )[:,:-1,:]
+        
+        loss_CE = nn.CrossEntropyLoss
+        
+        soft_labels = F.softmax(logits_m, dim=1)
+        loss_distill = -torch.sum(F.log_softmax(nsp_output, dim=1) * soft_labels, dim=-1)
+        los
 
 
-
-        #7. Next word prediction
+        #7. Next property prediction
 
 
 
