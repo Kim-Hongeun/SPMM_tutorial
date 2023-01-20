@@ -31,6 +31,10 @@ class SPMM(nn.Module):
         self.property_CLS = nn.Parameter(torch.zeros([1, 1, propertyWidth]))
         self.property_MASK = nn.Parameter(torch.zeros([1, 1, propertyWidth]))
         
+        self.target_reg = nn.Sequential(nn.Linear(propertyWidth, propertyWidth),
+                                        nn.GELU(),
+                                        nn.LayerNorm(propertyWidth, property_config.layer_norm_eps),
+                                        nn.Linear(propertyWidth, 1))
 
         self.temp = nn.Parameter(torch.ones([]) * config['temp'])
         self.queue_size = config['queue_size']
@@ -77,6 +81,8 @@ class SPMM(nn.Module):
         inputProperty = torch.cat([self.property_CLS.expand(property.size(0), -1,-1), maskedProperty], dim=1)
 
         #2. input through encoders
+
+        ############## propertyEncoder은 따로 mode='text' 안해줘도 되나???? ##############
         encProperty = self.propertyEncoder(inputs_embeds=inputProperty, return_dict=True).last_hidden_state
         propertyAtts = torch.ones(encProperty.size()[:-1], dtype=torch.long).to(inputProperty.device)
         propertyFeat = F.normalize(self.propertyProj(encProperty[:,0,:]), dim=-1)
@@ -88,7 +94,7 @@ class SPMM(nn.Module):
         with torch.no_grad():
             self._momentum_update()
             
-            encProperty_m = self.propertyEnoder_m(inputs_embeds=inputProperty, return_dic=True).last_hidden_state
+            encProperty_m = self.propertyEncoder_m(inputs_embeds=inputProperty, return_dic=True).last_hidden_state
             #propertyAtts_m = torch.ones(encProperty_m.size()[:-1], dtype=torch.long).to(inputProperty.device)
             propertyFeat_m = F.normalize(self.propertyProj_m(encProperty_m[:,0,:]), dim=-1)
             propertyFeatAll = torch.cat([propertyFeat_m.t(), self.property_queue.clone().detach()], dim=1)
@@ -231,17 +237,59 @@ class SPMM(nn.Module):
                                         return_logits = True
                                         )[:,:-1,:]
         
+        per_nsp_output= nsp_output.permute((0,2,1))
+
         loss_CE = nn.CrossEntropyLoss
+        loss_onehot = loss_CE(per_nsp_output, labels)
         
         soft_labels = F.softmax(logits_m, dim=1)
         loss_distill = -torch.sum(F.log_softmax(nsp_output, dim=1) * soft_labels, dim=-1)
-        los
+        loss_distill = (loss_distill * (labels != 0)).mean()
+
+        loss_nsp = (1-alpha)*loss_onehot + alpha*loss_distill
 
 
         #7. Next property prediction
 
+        propertyTargets = property.clone()
 
+        with torch.no_grad():
+            encProperty_masked_m = self.propertyEncoder_m.bert(encoder_embeds = inputProperty,
+                                                               return_dict = True,
+                                                               is_decoder = True
+                                                               ).last_hidden_state
+            
+            npp_output_m = self.smilesEncoder_m.bert(encoder_embeds = encProperty_masked_m,
+                                                     attention_mask = propertyAtts,
+                                                     encoder_hidden_states = encSmiles_m,
+                                                     encoder_attention_mask = smilesAttentionMask,
+                                                     return_dict = True,
+                                                     is_decoder = True,
+                                                     mode = 'fusion'
+                                                     ).last_hidden_state[:,:-1,:]
+            
+            pred_m = self.target_reg(npp_output_m).squeeze(2)
+        
+        encProperty_masked = self.propertyEncoder.bert(encoder = inputProperty,
+                                                       return_dict = True,
+                                                       is_decoder = True
+                                                       ).last_hidden_state
+        
+        npp_output = self.smilesEncoder.bert(encode_embeds = encProperty_masked,
+                                             attention_mask = propertyAtts,
+                                             encoder_hidden_states = encSmiles,
+                                             encoder_attention_mask = smilesAttentionMask,
+                                             return_dict = True,
+                                             is_decoder = True,
+                                             mode = 'fusion'
+                                             ).last_hidden_state[:,:-1,:]
+        
+        pred = self.target_reg(npp_output).squeeze(2)
 
+        loss_MSE = nn.MSELoss()
+        loss_npp = loss_MSE(pred*halfMask, propertyTargets*halfMask)
+
+        return loss_psc + loss_psm + loss_nsp + loss_npp
         
     @torch.no_grad()
     def copy_params(self):
