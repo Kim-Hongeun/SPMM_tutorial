@@ -58,8 +58,6 @@ class SPMM(nn.Module):
 
         # Create the queue
         self.register_buffer("property_queue", torch.randn(embed_dim, self.queue_size))
-        print('111')
-        print("property queue: ", self.property_queue)
         self.register_buffer("smiles_queue", torch.randn(embed_dim, self.queue_size))
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
 
@@ -84,7 +82,7 @@ class SPMM(nn.Module):
 
         #2. input through encoders
 
-        encProperty = self.propertyEncoder(inputs_embeds=inputProperty, return_dict=True).last_hidden_state
+        encProperty = self.propertyEncoder.bert(inputs_embeds=inputProperty, return_dict=True).last_hidden_state
         propertyAtts = torch.ones(encProperty.size()[:-1], dtype=torch.long).to(inputProperty.device)
         propertyFeat = F.normalize(self.propertyProj(encProperty[:,0,:]), dim=-1)
 
