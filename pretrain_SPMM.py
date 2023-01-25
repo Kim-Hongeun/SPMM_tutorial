@@ -57,8 +57,10 @@ class SPMM(nn.Module):
         self.copy_params()
 
         # Create the queue
+        self.register_buffer("property_queue", torch.randn(embed_dim, self.queue_size))
+        print('111')
+        print("property queue: ", self.property_queue)
         self.register_buffer("smiles_queue", torch.randn(embed_dim, self.queue_size))
-        self.register_buffer("text_queue", torch.randn(embed_dim, self.queue_size))
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
 
         self.property_queue = nn.functional.normalize(self.property_queue, dim=0)
@@ -82,7 +84,6 @@ class SPMM(nn.Module):
 
         #2. input through encoders
 
-        ############## propertyEncoder은 따로 mode='text' 안해줘도 되나???? ##############
         encProperty = self.propertyEncoder(inputs_embeds=inputProperty, return_dict=True).last_hidden_state
         propertyAtts = torch.ones(encProperty.size()[:-1], dtype=torch.long).to(inputProperty.device)
         propertyFeat = F.normalize(self.propertyProj(encProperty[:,0,:]), dim=-1)
@@ -289,7 +290,7 @@ class SPMM(nn.Module):
         loss_MSE = nn.MSELoss()
         loss_npp = loss_MSE(pred*halfMask, propertyTargets*halfMask)
 
-        return loss_psc + loss_psm + loss_nsp + loss_npp
+        return loss_psc, loss_psm, loss_nsp, loss_npp
         
     @torch.no_grad()
     def copy_params(self):
