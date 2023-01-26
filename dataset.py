@@ -18,7 +18,7 @@ class SMILESDataset(Dataset):
 
         if shuffle:
             random.shuffle(self.data)
-        
+            
         ## Why need this line? ##
         if data_length is not None:
             self.data = self.data[data_length[0]: data_length[1]]
@@ -28,6 +28,6 @@ class SMILESDataset(Dataset):
 
     def __getitem__(self, idx):
         smiles = 'Q' + self.data[idx]
-        properties = (calculate_property(smiles[1:])-self.property_std) / self.property_mean
+        properties = (calculate_property(smiles[1:])-self.property_mean) / self.property_std
         
         return smiles, properties

@@ -12,7 +12,7 @@ class SPMM(nn.Module):
                  ):
         super().__init__()
 
-        self.tokenizer = BertTokenizer('./vocab_bpe_300.txt', do_lower_case=False,do_basic_tokenize=False)
+        self.tokenizer = tokenizer
         embed_dim = config['embed_dim']
 
         smilesAndFusion_config = BertConfig.from_json_file('./config_bert_smiles_and_fusion_encoder.json')
@@ -28,8 +28,8 @@ class SPMM(nn.Module):
 
         # special tokens & embedding for property input
         self.propertyEmbed = nn.Linear(1, propertyWidth)
-        self.property_CLS = nn.Parameter(torch.zeros([1, 1, propertyWidth]))
-        self.property_MASK = nn.Parameter(torch.zeros([1, 1, propertyWidth]))
+        self.property_CLS = nn.Parameter(torch.zeros(1, 1, propertyWidth))
+        self.property_MASK = nn.Parameter(torch.zeros(1, 1, propertyWidth))
         
         self.target_reg = nn.Sequential(nn.Linear(propertyWidth, propertyWidth),
                                         nn.GELU(),
@@ -66,24 +66,26 @@ class SPMM(nn.Module):
 
 
 
-    def forward(self, property, smilesIds, smilesAttentionMask, alpha=0):
+    def forward(self, property, smilesIds, smilesAttentionMask, alpha):
         
         with torch.no_grad():
-            self.temp.clamp_(0.001, 0.5)
+            self.temp.clamp_(0.01, 0.5)
 
         #1. property tokenizing & embedding
+        for p in self.propertyEmbed.parameters():
+            print(p)
         embedProperty = self.propertyEmbed(property.unsqueeze(2))
-        
         property_MASK = self.property_MASK.expand(property.size(0), property.size(1), -1)
-        halfMask = torch.bernoulli(torch.full(property.shape, 0.5))
+        halfMask = torch.bernoulli(torch.ones_like(property)*0.5)
         halfMaskBatch = halfMask.unsqueeze(2).repeat(1,1,property_MASK.size(2))
-        maskedProperty = embedProperty* halfMaskBatch 
+        maskedProperty = embedProperty* (1-halfMaskBatch) + property_MASK * halfMaskBatch 
+        #print(maskedProperty)
         inputProperty = torch.cat([self.property_CLS.expand(property.size(0), -1,-1), maskedProperty], dim=1)
 
         #2. input through encoders
 
         encProperty = self.propertyEncoder.bert(inputs_embeds=inputProperty, return_dict=True).last_hidden_state
-        propertyAtts = torch.ones(encProperty.size()[:-1], dtype=torch.long).to(inputProperty.device)
+        propertyAtts = torch.ones(encProperty.size()[:-1], dtype=torch.long).to(property.device)
         propertyFeat = F.normalize(self.propertyProj(encProperty[:,0,:]), dim=-1)
 
         encSmiles = self.smilesEncoder.bert(smilesIds, attention_mask=smilesAttentionMask, return_dict=True, mode='text').last_hidden_state
@@ -156,6 +158,8 @@ class SPMM(nn.Module):
         #5. SMILES - Property Matching
         with torch.no_grad():
             batch_size = property.size(0)
+            #print("sim_p2s", sim_p2s)
+            #print("sim_s2p", sim_s2p)
             weights_p2s = F.softmax(sim_p2s[:,:batch_size], dim=1)
             weights_s2p = F.softmax(sim_s2p[:,:batch_size], dim=1)
 
@@ -165,6 +169,7 @@ class SPMM(nn.Module):
         encProperty_neg = []
         
         for b in range(batch_size):
+            #print(weights_p2s[b])
             neg_idx = torch.multinomial(weights_p2s[b], 1).item()
             encProperty_neg.append(encProperty[neg_idx])
         encProperty_neg = torch.stack(encProperty_neg, dim=0)
@@ -207,9 +212,8 @@ class SPMM(nn.Module):
         ps_output = self.psm_head(ps_embeddings)
 
         psm_labels = torch.cat([torch.ones(batch_size, dtype=torch.long), torch.zeros(batch_size*2, dtype=torch.long)], 
-                               dim=0
-                               ).to(property.device)
-        
+                               dim=0).to(property.device)
+
         loss_psm = F.cross_entropy(ps_output, psm_labels)  #property-smiles matching loss 
 
         #6. Next smiles prediction
@@ -244,9 +248,9 @@ class SPMM(nn.Module):
         #print("per_nsp_output shape", per_nsp_output.size())
         loss_onehot = loss_CE(per_nsp_output, labels)
         
-        soft_labels = F.softmax(logits_m, dim=1)
-        loss_distill = -torch.sum(F.log_softmax(nsp_output, dim=1) * soft_labels, dim=-1)
-        loss_distill = (loss_distill * (labels != 0)).mean()
+        soft_labels = F.softmax(logits_m, dim=-1)
+        loss_distill = -torch.sum(F.log_softmax(nsp_output, dim=-1) * soft_labels, dim=-1)
+        loss_distill = loss_distill[labels != 0].mean()
 
         loss_nsp = (1-alpha)*loss_onehot + alpha*loss_distill
 
@@ -289,7 +293,7 @@ class SPMM(nn.Module):
         pred = self.target_reg(npp_output).squeeze(2)
 
         loss_MSE = nn.MSELoss()
-        loss_npp = loss_MSE(pred*halfMask, propertyTargets*halfMask)
+        loss_npp = loss_MSE(pred[(1-halfMask).to(bool)], propertyTargets[(1-halfMask).to(bool)])
 
         return loss_psc, loss_psm, loss_nsp, loss_npp
         
@@ -309,14 +313,17 @@ class SPMM(nn.Module):
     @torch.no_grad()
     def _dequeue_and_enqueue(self, property_feat, smiles_feat):
 
-        batch_size = property_feat.shape[0]
+        property_feats = property_feat
+        smiles_feats = smiles_feat
+
+        batch_size = property_feats.shape[0]
 
         ptr = int(self.queue_ptr)
         assert self.queue_size % batch_size == 0
 
-        self.property_queue[:, ptr:ptr + batch_size] = property_feat.T
-        self.smiles_queue[:, ptr:ptr + batch_size] = smiles_feat.T
-        ptr = (ptr + batch_size) & self.queue_size 
+        self.property_queue[:, ptr:ptr + batch_size] = property_feats.T
+        self.smiles_queue[:, ptr:ptr + batch_size] = smiles_feats.T
+        ptr = (ptr + batch_size) % self.queue_size 
 
         self.queue_ptr[0] = ptr
 
