@@ -75,7 +75,7 @@ class SPMM(nn.Module):
         #1. property tokenizing & embedding
         embedProperty = self.propertyEmbed(property.unsqueeze(2))
         property_MASK = self.property_MASK.expand(property.size(0), property.size(1), -1)
-        halfMask = torch.bernoulli(torch.ones_like(property) * 0.5)
+        halfMask = torch.bernoulli(torch.ones_like(property) * 0.5).to(property.device)
         halfMaskBatch = halfMask.unsqueeze(2).repeat(1,1,property_MASK.size(2))
         maskedProperty = embedProperty* (1-halfMaskBatch) + property_MASK * halfMaskBatch 
         #print(maskedProperty)
@@ -84,7 +84,7 @@ class SPMM(nn.Module):
         #2. input through encoders
 
         encProperty = self.propertyEncoder.bert(inputs_embeds=inputProperty, return_dict=True).last_hidden_state
-        propertyAtts = torch.ones(encProperty.size()[:-1], dtype=torch.long).to(inputProperty.device)
+        propertyAtts = torch.ones(encProperty.size()[:-1], dtype=torch.long).to(property.device)
         propertyFeat = F.normalize(self.propertyProj(encProperty[:,0,:]), dim=-1)
 
         encSmiles = self.smilesEncoder.bert(smilesIds, attention_mask=smilesAttentionMask, return_dict=True, mode='text').last_hidden_state
@@ -109,9 +109,9 @@ class SPMM(nn.Module):
             sim_s2s_m = smilesFeat_m @ smilesFeatAll / self.temp
 
             ## Make Target ##
-            sim_targets_diff = torch.zeros(sim_p2s_m.size()).to(inputProperty.device)
+            sim_targets_diff = torch.zeros(sim_p2s_m.size()).to(property.device)
             sim_targets_diff.fill_diagonal_(1)
-            sim_targets_same = torch.zeros(sim_p2p_m.size()).to(inputProperty.device)
+            sim_targets_same = torch.zeros(sim_p2p_m.size()).to(property.device)
             sim_targets_same.fill_diagonal_(1)
           
             sim_p2s_targets = alpha * F.softmax(sim_p2s_m, dim=1) + (1-alpha) * sim_targets_diff
@@ -211,7 +211,7 @@ class SPMM(nn.Module):
         ps_output = self.psm_head(ps_embeddings)
 
         psm_labels = torch.cat([torch.ones(batch_size, dtype=torch.long), torch.zeros(batch_size*2, dtype=torch.long)], 
-                               dim=0).to(inputProperty.device)
+                               dim=0).to(property.device)
 
         loss_psm = F.cross_entropy(ps_output, psm_labels)  #property-smiles matching loss 
 

@@ -33,8 +33,8 @@ def train(model, data_loader, optimizer, tokenizer, epoch, warmup_steps, device,
         property = property.to(device)
         smiles_token = tokenizer(smiles, padding='longest', truncation=True, max_length=50, return_tensors="pt").to(device)
         #print(smiles_token)
-        smilesIds = smiles_token['input_ids']
-        smilesAttentionMask = smiles_token['attention_mask']
+        smilesIds = smiles_token['input_ids'].to(device)
+        smilesAttentionMask = smiles_token['attention_mask'].to(device)
         
         if epoch > 0:
             alpha = config['alpha']
@@ -100,7 +100,7 @@ def main(args, config):
         state_dict = checkpoint['model']
         if args.resume:
             optimizer.load_state_dict(checkpoint['optimizer'])
-            lr_scheduler.load_state_dict(checkpoint['lr_schedular'])
+            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             start_epoch = checkpoint['epoch'] + 1
         model.load_state_dict(state_dict)
         print('load checkpoint form %s' % args.checkpoint)
@@ -134,14 +134,14 @@ def main(args, config):
                 'config': config,
                 'epoch': epoch
             }
-        torch.save(save_obj, os.path.join(args.output_dir, 'checkpoint_%02d.pth' % epoch))
-        print('SAVE DONE','checkpoint_%02d.pth' % epoch)
+            torch.save(save_obj, os.path.join(args.output_dir, 'checkpoint_%02d.pth' % epoch))
+            print('SAVE DONE','checkpoint_%02d.pth' % epoch)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training Time {}'.format(total_time_str))
 
-    print("test clear")
+    print("pretrain clear")
 
 
 if __name__ == '__main__':
@@ -159,7 +159,7 @@ if __name__ == '__main__':
     pretrain_config = {
         'embed_dim': 256,#256
         'property_width': 384, #???
-        'batch_size': 4,#64
+        'batch_size': 64,
         'temp': 0.07,
         'queue_size': 2048,#65536
         'mlm_probability': 0.15,
