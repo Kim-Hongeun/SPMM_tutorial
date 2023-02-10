@@ -64,7 +64,7 @@ def evaluate(model, data_loader, tokenizer, device):
 
 @torch.no_grad()
 def metric_eval(ref,cand):
-    with open('./property_name.txt', 'r') as f: tmp=f.readlines()[1:54]
+    with open('./property_name.txt', 'r') as f: tmp=f.readlines()[:54]
     names=[l.strip() for l in tmp]
     with open('./normalize.pkl', 'rb') as w:    norm = pickle.load(w)
     mean,std = norm

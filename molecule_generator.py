@@ -85,8 +85,9 @@ def generate_with_property(model, property, tokenizer, device,n_sample,prop_mask
 
 @torch.no_grad()
 def metric_eval(prop_input,cand,mask):
-    with open('./property_name.txt', 'r') as f: tmp=f.readlines()[1:54]
+    with open('./property_name.txt', 'r') as f: tmp=f.readlines()[:54]
     names=[l.strip() for l in tmp]
+    print(names)
 
     with open('./normalize.pkl', 'rb') as w:    norm = pickle.load(w)
     general_mean = norm[0]
@@ -129,7 +130,7 @@ def metric_eval(prop_input,cand,mask):
         plt.margins(0.05, 0.2)
         if mask[j]==0:  plt.axvline(x=prop_input[j],linestyle="--",c='r',linewidth=1.5,zorder=-10)
         if mask[j]==0 or (1-mask).sum().item()==0:  plt.axvline(x=general_mean[j],linestyle="-", c='#666',linewidth=2)
-    plt.suptitle("(d) No property control", fontsize=20,y=0.925)
+    plt.suptitle("Control all 53 properties", fontsize=20,y=0.925)
     #plt.savefig('result2.png', dpi=150)    #save figure
     plt.show()
 
@@ -179,10 +180,10 @@ def main(args, config):
 
     ### Your have to set your prop_input and prop_mask from here ###
     prop_input=calculate_property('COc1cccc(NC(=O)CN(C)C(=O)COC(=O)c2cc(c3cccs3)nc3ccccc23)c1') # tensor with a length of 53
-    prop_input[14] = 150        # 14th property: molecular weight
+    #prop_input[14] = 150        # 14th property: molecular weight
     
-    prop_mask=torch.ones(53)    # In prop_mask, 1: masked, 0:not masked
-    prop_mask[14]=0             # The model only considers MW=140, and the other properties are masked
+    prop_mask=torch.zeros(53)    # In prop_mask, 1: masked, 0:not masked
+    #prop_mask[14]=0             # The model only considers MW=140, and the other properties are masked
     ### Your have to set your prop_input and prop_mask until here ###
 
     samples = generate_with_property(model_without_ddp, prop_input, tokenizer, device, args.n_generate, prop_mask)
